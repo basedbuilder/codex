@@ -371,6 +371,7 @@ fn make_chatwidget_manual() -> (
         queued_user_messages: VecDeque::new(),
         suppress_session_configured_redraw: false,
         pending_notification: None,
+        pending_sounds: Vec::new(),
         is_review_mode: false,
         pre_review_token_info: None,
         needs_final_message_separator: false,

@@ -105,6 +105,7 @@ use crate::slash_command::SlashCommand;
 use crate::status::RateLimitSnapshotDisplay;
 use crate::text_formatting::truncate_text;
 use crate::tui::FrameRequester;
+use crate::tui::SoundEffect;
 mod interrupts;
 use self::interrupts::InterruptManager;
 mod agent;
@@ -288,6 +289,7 @@ pub(crate) struct ChatWidget {
     queued_user_messages: VecDeque<UserMessage>,
     // Pending notification to show when unfocused on next Draw
     pending_notification: Option<Notification>,
+    pending_sounds: Vec<SoundEffect>,
     // Simple review mode flag; used to adjust layout and banners.
     is_review_mode: bool,
     // Snapshot of token usage to restore after review mode exits.
@@ -480,12 +482,16 @@ impl ChatWidget {
         self.running_commands.clear();
         self.request_redraw();
 
+        let had_queued_user_messages = !self.queued_user_messages.is_empty();
         // If there is a queued user message, send exactly one now to begin the next turn.
         self.maybe_send_next_queued_input();
         // Emit a notification when the turn completes (suppressed if focused).
         self.notify(Notification::AgentTurnComplete {
             response: last_agent_message.unwrap_or_default(),
         });
+        if !had_queued_user_messages {
+            self.queue_sound(SoundEffect::TurnComplete);
+        }
 
         self.maybe_show_pending_rate_limit_prompt();
     }
@@ -1007,6 +1013,7 @@ impl ChatWidget {
         let command = shlex::try_join(ev.command.iter().map(String::as_str))
             .unwrap_or_else(|_| ev.command.join(" "));
         self.notify(Notification::ExecApprovalRequested { command });
+        self.queue_sound(SoundEffect::UserActionNeeded);
 
         let request = ApprovalRequest::Exec {
             id,
@@ -1037,6 +1044,7 @@ impl ChatWidget {
             cwd: self.config.cwd.clone(),
             changes: ev.changes.keys().cloned().collect(),
         });
+        self.queue_sound(SoundEffect::UserActionNeeded);
     }
 
     pub(crate) fn handle_exec_begin_now(&mut self, ev: ExecCommandBeginEvent) {
@@ -1182,6 +1190,7 @@ impl ChatWidget {
             show_welcome_banner: true,
             suppress_session_configured_redraw: false,
             pending_notification: None,
+            pending_sounds: Vec::new(),
             is_review_mode: false,
             pre_review_token_info: None,
             needs_final_message_separator: false,
@@ -1257,6 +1266,7 @@ impl ChatWidget {
             show_welcome_banner: true,
             suppress_session_configured_redraw: true,
             pending_notification: None,
+            pending_sounds: Vec::new(),
             is_review_mode: false,
             pre_review_token_info: None,
             needs_final_message_separator: false,
@@ -1804,7 +1814,19 @@ impl ChatWidget {
         self.request_redraw();
     }
 
+    fn queue_sound(&mut self, effect: SoundEffect) {
+        self.pending_sounds.push(effect);
+        self.request_redraw();
+    }
+
+    fn maybe_play_pending_sounds(&mut self, tui: &mut crate::tui::Tui) {
+        for effect in self.pending_sounds.drain(..) {
+            tui.play_sound(effect);
+        }
+    }
+
     pub(crate) fn maybe_post_pending_notification(&mut self, tui: &mut crate::tui::Tui) {
+        self.maybe_play_pending_sounds(tui);
         if let Some(notif) = self.pending_notification.take() {
             tui.notify(notif.display());
         }

@@ -5,6 +5,7 @@ use std::io::Stdout;
 use std::io::stdout;
 use std::panic;
 use std::pin::Pin;
+use std::process::Command as ProcessCommand;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -22,6 +23,7 @@ use crossterm::event::KeyEvent;
 use crossterm::event::KeyboardEnhancementFlags;
 use crossterm::event::PopKeyboardEnhancementFlags;
 use crossterm::event::PushKeyboardEnhancementFlags;
+use crossterm::style::Print;
 use crossterm::terminal::EnterAlternateScreen;
 use crossterm::terminal::LeaveAlternateScreen;
 use crossterm::terminal::supports_keyboard_enhancement;
@@ -193,6 +195,21 @@ impl FrameRequester {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum SoundEffect {
+    TurnComplete,
+    UserActionNeeded,
+}
+
+impl SoundEffect {
+    fn pattern(self) -> &'static str {
+        match self {
+            SoundEffect::TurnComplete => "\x07",
+            SoundEffect::UserActionNeeded => "\x07\x07",
+        }
+    }
+}
+
 impl Tui {
     pub fn new(terminal: Terminal) -> Self {
         let (frame_schedule_tx, frame_schedule_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -235,11 +252,96 @@ impl Tui {
     /// Returns true if a notification was posted.
     pub fn notify(&mut self, message: impl AsRef<str>) -> bool {
         if !self.terminal_focused.load(Ordering::Relaxed) {
-            let _ = execute!(stdout(), PostNotification(message.as_ref().to_string()));
-            true
-        } else {
-            false
+            let message = message.as_ref();
+            let osc_posted = self.post_notification_osc9(message);
+            let native_posted = self.post_native_notification(message);
+            return osc_posted || native_posted;
         }
+        false
+    }
+
+    fn post_notification_osc9(&mut self, message: &str) -> bool {
+        let _ = execute!(stdout(), PostNotification(message.to_string()));
+        true
+    }
+
+    fn post_native_notification(&self, message: &str) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            if Self::spawn_notifier(
+                "terminal-notifier",
+                &["-title", "Codex", "-message", message],
+            ) {
+                return true;
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            if Self::spawn_notifier("notify-send", &["Codex", message]) {
+                return true;
+            }
+        }
+
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        let _ = message;
+
+        false
+    }
+
+    fn spawn_notifier(binary: &str, args: &[&str]) -> bool {
+        let mut cmd = ProcessCommand::new(binary);
+        cmd.args(args);
+        cmd.spawn().is_ok()
+    }
+
+    pub fn play_sound(&mut self, effect: SoundEffect) {
+        if self.play_native_sound(effect) {
+            return;
+        }
+        let _ = execute!(stdout(), Print(effect.pattern()));
+    }
+
+    fn play_native_sound(&self, effect: SoundEffect) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            let sound = match effect {
+                SoundEffect::TurnComplete => "Glass",
+                SoundEffect::UserActionNeeded => "Submarine",
+            };
+            let path = format!("/System/Library/Sounds/{sound}.aiff");
+            if Self::spawn_notifier("afplay", &[path.as_str()]) {
+                return true;
+            }
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            let sound = match effect {
+                SoundEffect::TurnComplete => "Asterisk",
+                SoundEffect::UserActionNeeded => "Exclamation",
+            };
+            let ps_expr = format!("[System.Media.SystemSounds]::{sound}.Play()");
+            if Self::spawn_notifier(
+                "powershell",
+                &["-NoProfile", "-NonInteractive", "-Command", &ps_expr],
+            ) {
+                return true;
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            let sound = match effect {
+                SoundEffect::TurnComplete => "message",
+                SoundEffect::UserActionNeeded => "complete",
+            };
+            if Self::spawn_notifier("canberra-gtk-play", &["-i", sound]) {
+                return true;
+            }
+        }
+
+        false
     }
 
     pub fn event_stream(&self) -> Pin<Box<dyn Stream<Item = TuiEvent> + Send + 'static>> {
